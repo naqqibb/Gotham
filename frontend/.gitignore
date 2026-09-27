@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.local
+.vite/
+
+# tsc -b composite build outputs
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
