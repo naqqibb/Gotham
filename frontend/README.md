@@ -26,6 +26,28 @@ npm run lint     # tsc --noEmit
 
 The `@` import alias maps to `src/` (see `vite.config.ts` and `tsconfig.json`).
 
+## Live data (optional)
+
+By default the dashboard runs on built-in seeded data. To drive it from the
+`../backend` service, set `VITE_API_BASE` (see `.env.example`):
+
+```bash
+# terminal 1
+cd ../backend && npm install && npm start        # serves on :8080
+
+# terminal 2
+cd frontend
+echo "VITE_API_BASE=http://localhost:8080" > .env.local
+npm run dev
+```
+
+When `VITE_API_BASE` is set, `src/lib/api.ts` reports `LIVE = true`: the app
+fetches `/api/metrics`, `/api/alerts`, `/api/providers`, and `/api/devices` on
+load, re-polls them every 15s, and subscribes to `/api/stream` (SSE) for
+per-3s metric slots. The header subtitle shows "live feed (backend)" vs
+"seeded demo data" so you can tell which mode is active. With the var unset,
+no network calls are made and the local simulation runs instead.
+
 ## Layout
 
 ```

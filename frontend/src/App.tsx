@@ -15,18 +15,20 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  LIVE,
+  getAlerts,
+  getDevices,
+  getMetrics,
+  getProviders,
+  openStream,
+  type Alert,
+  type Device,
+  type Provider,
+  type Sev,
+} from "@/lib/api";
 
 // ---------------- data ----------------
-
-type Sev = "critical" | "major" | "minor" | "info";
-
-interface Alert {
-  id: string;
-  sev: Sev;
-  time: string;
-  source: string;
-  message: string;
-}
 
 // Seed incidents drawn from real, publicly reported network/cloud events.
 const SEED_ALERTS: Alert[] = [
@@ -71,15 +73,6 @@ const EXTRA_ALERTS: Omit<Alert, "id" | "time">[] = [
   { sev: "minor", source: "Uptime Bot", message: "SaaS dependency (collaboration suite) showing elevated 5xx rate from vendor side" },
 ];
 
-interface Device {
-  name: string;
-  site: string;
-  kind: string;
-  status: "up" | "degraded" | "down" | "maintenance";
-  uptime: string;
-  load: number;
-}
-
 const DEVICES: Device[] = [
   { name: "core-rtr-01", site: "KUL-DC1", kind: "Router", status: "up", uptime: "214d", load: 47 },
   { name: "core-rtr-02", site: "KUL-DC1", kind: "Router", status: "up", uptime: "214d", load: 52 },
@@ -93,7 +86,7 @@ const DEVICES: Device[] = [
   { name: "wan-rtr-07", site: "BKK-POP", kind: "Router", status: "up", uptime: "180d", load: 58 },
 ];
 
-const PROVIDERS = [
+const PROVIDERS: Provider[] = [
   { name: "AWS", status: "Operational" },
   { name: "Azure", status: "Operational" },
   { name: "Google Cloud", status: "Degraded — us-central1-b" },
@@ -210,11 +203,11 @@ function AlertsFeed({ alerts }: { alerts: Alert[] }) {
   );
 }
 
-function DeviceTable() {
+function DeviceTable({ devices = DEVICES }: { devices?: Device[] }) {
   const [filter, setFilter] = useState<"all" | "problems">("all");
   const rows = useMemo(
-    () => (filter === "all" ? DEVICES : DEVICES.filter((d) => d.status !== "up")),
-    [filter],
+    () => (filter === "all" ? devices : devices.filter((d) => d.status !== "up")),
+    [filter, devices],
   );
   return (
     <Card>
@@ -271,14 +264,14 @@ function DeviceTable() {
   );
 }
 
-function ProviderStatus() {
+function ProviderStatus({ providers = PROVIDERS }: { providers?: Provider[] }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>External dependencies</CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
-        {PROVIDERS.map((p) => {
+        {providers.map((p) => {
           const bad = p.status !== "Operational" && p.status !== "Recovered";
           const rec = p.status === "Recovered";
           return (
@@ -463,12 +456,58 @@ function SiteHealth() {
 export default function App() {
   const [history, setHistory] = useState(() => makeHistory(48));
   const [alerts, setAlerts] = useState<Alert[]>(SEED_ALERTS);
+  const [devices, setDevices] = useState<Device[]>(DEVICES);
+  const [providers, setProviders] = useState<Provider[]>(PROVIDERS);
   const [clock, setClock] = useState(() => new Date());
   const [, setExtraIdx] = useState(0);
 
+  // Header clock ticks in every mode.
   useEffect(() => {
+    const c = setInterval(() => setClock(new Date()), 1000);
+    return () => clearInterval(c);
+  }, []);
+
+  // --- Live mode: pull from the NOC backend (fetch + SSE). ---
+  useEffect(() => {
+    if (!LIVE) return;
+    let cancelled = false;
+
+    const load = async () => {
+      const [m, a, p, d] = await Promise.allSettled([
+        getMetrics(),
+        getAlerts(),
+        getProviders(),
+        getDevices(),
+      ]);
+      if (cancelled) return;
+      if (m.status === "fulfilled") setHistory(m.value);
+      if (a.status === "fulfilled") setAlerts(a.value);
+      if (p.status === "fulfilled") setProviders(p.value);
+      if (d.status === "fulfilled") setDevices(d.value);
+    };
+
+    load();
+    const es = openStream({
+      onHello: (h) => !cancelled && setHistory(h),
+      onSlot: (slot) =>
+        setHistory((prev) => {
+          const next = [...prev, slot];
+          return next.length > 48 ? next.slice(next.length - 48) : next;
+        }),
+    });
+    const poll = setInterval(load, 15000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+      es?.close();
+    };
+  }, []);
+
+  // --- Seeded mode: simulate metrics locally when there is no backend. ---
+  useEffect(() => {
+    if (LIVE) return;
     const tick = setInterval(() => {
-      setClock(new Date());
       setHistory((prev) => {
         const next = [...prev];
         const last = next[next.length - 1];
@@ -485,7 +524,9 @@ export default function App() {
     return () => clearInterval(tick);
   }, []);
 
+  // --- Seeded mode: synthesize new alerts when there is no backend. ---
   useEffect(() => {
+    if (LIVE) return;
     const fire = setInterval(() => {
       setExtraIdx((i) => {
         const e = EXTRA_ALERTS[i % EXTRA_ALERTS.length];
@@ -507,8 +548,8 @@ export default function App() {
 
   const openCrit = alerts.filter((a) => a.sev === "critical").length;
   const openMajor = alerts.filter((a) => a.sev === "major").length;
-  const devicesDown = DEVICES.filter((d) => d.status === "down").length;
-  const devicesDegraded = DEVICES.filter((d) => d.status === "degraded").length;
+  const devicesDown = devices.filter((d) => d.status === "down").length;
+  const devicesDegraded = devices.filter((d) => d.status === "degraded").length;
   const avgLatency = history[history.length - 1].latency;
 
   const overall = devicesDown > 0 || openCrit > 0 ? "DEGRADED" : devicesDegraded > 0 ? "WATCH" : "NOMINAL";
@@ -537,7 +578,9 @@ export default function App() {
               </Badge>
             </div>
             <h1 className="text-3xl font-semibold tracking-tight">Global Network Health</h1>
-            <p className="text-sm text-slate-400">Sites: MY · SG · DE · TH · AU — refreshed every 3s</p>
+            <p className="text-sm text-slate-400">
+              Sites: MY · SG · DE · TH · AU — {LIVE ? "live feed (backend)" : "seeded demo data"}, refreshed every 3s
+            </p>
           </div>
           <div className="text-right">
             <div className="font-mono text-2xl tabular-nums">
@@ -624,10 +667,10 @@ export default function App() {
         <div className="grid gap-4 lg:grid-cols-3">
           <div className="space-y-4 lg:col-span-2">
             <TopologyMap />
-            <DeviceTable />
+            <DeviceTable devices={devices} />
             <div className="grid gap-4 md:grid-cols-2">
               <SiteHealth />
-              <ProviderStatus />
+              <ProviderStatus providers={providers} />
             </div>
           </div>
           <div className="space-y-4">
